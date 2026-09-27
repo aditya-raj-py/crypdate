@@ -1,0 +1,16 @@
+﻿# Data
+crypdate.db
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Plots
+*.png
+
+# OS
+.DS_Store
+crypdate_datacollector.py
