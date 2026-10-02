@@ -280,13 +280,99 @@ def compute_decision_percentages(
     }
 
 
-def compute_confidence_scores(forecast: pd.DataFrame) -> pd.DataFrame:
+def compute_confidence_scores(
+    forecast: pd.DataFrame,
+    high_threshold_pct: float = 8.0,
+    low_threshold_pct: float = 20.0,
+) -> pd.DataFrame:
     """
-    v4.2 placeholder.
-    Intended to derive a confidence score per forecasted point, e.g. from
-    the width of (yhat_upper - yhat_lower) relative to yhat.
+    v4.2 - Confidence scoring (absolute-threshold version).
+
+    Adds 'interval_half_width_pct' (how wide the confidence interval is,
+    as a percentage of the predicted price), 'confidence_score' (0-1,
+    higher = more confident), and 'confidence_label' ("Low"/"Medium"/
+    "High") columns to the forecast dataframe.
+
+    IMPORTANT: this uses FIXED, absolute thresholds you set (as a % of
+    predicted price), not a ranking relative to other points in the same
+    forecast. An earlier version normalized against this forecast's own
+    min/max interval widths - but since Prophet's uncertainty always
+    grows toward the forecast horizon, the future point we actually care
+    about was nearly always the widest in its own comparison group,
+    structurally biasing it toward "Low" regardless of whether the
+    forecast was actually any good. Absolute thresholds avoid that.
+
+    Defaults (8% / 20%) are a starting point for daily crypto forecasts -
+    recalibrate based on what interval_half_width_pct actually looks like
+    for your data (it's included in the output so you can inspect it).
     """
-    raise NotImplementedError("Planned for v4.2")
+    forecast = forecast.copy()
+
+    half_width = (forecast["yhat_upper"] - forecast["yhat_lower"]) / 2
+    half_width_pct = (
+        half_width / forecast["yhat"].abs().replace(0, pd.NA)) * 100
+    half_width_pct = half_width_pct.fillna(half_width_pct.mean())
+
+    forecast["interval_half_width_pct"] = half_width_pct.round(2)
+
+    def score_row(pct):
+        if pct <= high_threshold_pct:
+            return 1.0
+        elif pct >= low_threshold_pct:
+            return 0.0
+        else:
+            # linear interpolation between the two thresholds
+            return round(1 - (pct - high_threshold_pct) / (low_threshold_pct - high_threshold_pct), 3)
+
+    forecast["confidence_score"] = half_width_pct.apply(score_row)
+
+    def label_row(score):
+        if score >= 0.66:
+            return "High"
+        elif score >= 0.33:
+            return "Medium"
+        else:
+            return "Low"
+
+    forecast["confidence_label"] = forecast["confidence_score"].apply(
+        label_row)
+
+    return forecast
+
+
+def apply_confidence_to_decision(decision: dict, forecast_with_confidence: pd.DataFrame) -> dict:
+    """
+    Looks up the confidence score/label at the decision's target_date and
+    adds them to the decision dict. If confidence is "Low", downgrades a
+    buy/sell signal to "hold" rather than acting on a shaky forecast -
+    the decision still reports what the raw signal WOULD have been, via
+    'raw_signal', so nothing is hidden, just not blindly acted on.
+    """
+    decision = dict(decision)  # don't mutate caller's dict
+
+    target_date = pd.to_datetime(decision["target_date"])
+    forecast_with_confidence = forecast_with_confidence.copy()
+    forecast_with_confidence["date_diff"] = (
+        forecast_with_confidence["ds"] - target_date).abs()
+    closest_row = forecast_with_confidence.loc[forecast_with_confidence["date_diff"].idxmin(
+    )]
+
+    confidence_score = float(closest_row["confidence_score"])
+    confidence_label = str(closest_row["confidence_label"])
+
+    decision["confidence_score"] = round(confidence_score, 3)
+    decision["confidence_label"] = confidence_label
+    decision["interval_half_width_pct"] = float(
+        closest_row["interval_half_width_pct"])
+    decision["raw_signal"] = decision["signal"]
+
+    if confidence_label == "Low" and decision["signal"] != "hold":
+        decision["signal"] = "hold"
+        decision["downgraded"] = True
+    else:
+        decision["downgraded"] = False
+
+    return decision
 
 
 # --------------------------------------------------------------------------
@@ -359,10 +445,21 @@ if __name__ == "__main__":
         buy_threshold=buy_threshold,
         sell_threshold=sell_threshold,
     )
-    print(f"\n--- Decision (v4.1) ---")
+
+    forecast_scored = compute_confidence_scores(forecast_df)
+    decision = apply_confidence_to_decision(decision, forecast_scored)
+
+    print(f"\n--- CRYPDATED ---")
     print(f"Last known price:     ${decision['last_price']:,}")
     print(
         f"Target date:          {decision['target_date']} ({horizon_days} days ahead)")
     print(f"Predicted price:      ${decision['predicted_price']:,}")
     print(f"Predicted change:     {decision['percent_change']:+.2f}%")
+    print(
+        f"Confidence:           {decision['confidence_label']} ({decision['confidence_score']:.2f})")
+    print(
+        f"Interval half-width:  {decision.get('interval_half_width_pct', 'n/a')}% of predicted price")
+    if decision["downgraded"]:
+        print(
+            f"Raw signal:            {decision['raw_signal'].upper()} (downgraded due to low confidence)")
     print(f"Signal:               {decision['signal'].upper()}")
