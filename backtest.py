@@ -148,10 +148,12 @@ def run_backtest(
         actual_pct = ((actual_price_future - actual_price_now) / actual_price_now) * 100
 
         def simulated_return_for(signal):
+            # No shorting: "buy" participates in the actual move; "sell" and
+            # "hold" both mean "sit in cash" (0%) rather than assuming
+            # profit from a decline. "Sell" is still tracked for win-rate
+            # purposes (was it right to get OUT), just doesn't fabricate gain.
             if signal == "buy":
                 return actual_pct
-            elif signal == "sell":
-                return -actual_pct
             return 0.0
 
         def correct_for(signal):
@@ -179,7 +181,7 @@ def run_backtest(
         downgrade_note = " (downgraded)" if filtered_signal != raw_signal else ""
         print(f"{results[-1]['date']}  raw={raw_signal:<5} conf={confidence_label:<6} (±{half_width_pct:.1f}%)  "
               f"predicted={predicted_pct:+.2f}%  actual={actual_pct:+.2f}%  "
-              f"{'✓' if results[-1]['raw_correct'] else '✗'}{downgrade_note}")
+              f"{'OK' if results[-1]['raw_correct'] else 'X'}{downgrade_note}")
 
         i += step_days
 
@@ -197,11 +199,19 @@ def run_backtest(
     def summarize(signal_col, return_col, correct_col, label):
         trades = results_df[results_df[signal_col] != "hold"]
         win_rate = trades[correct_col].mean() * 100 if len(trades) > 0 else 0.0
-        total_return = results_df[return_col].sum()
+
+        # Compound sequentially instead of naive summing - see backtest_xgboost.py
+        # for the full rationale (naive sums can exceed -100%, which is
+        # impossible for a long-only, no-leverage strategy).
+        portfolio = 1.0
+        for r in results_df[return_col]:
+            portfolio *= (1 + r / 100)
+        total_return = (portfolio - 1) * 100
+
         print(f"\n--- {label} ---")
-        print(f"Buy/Sell signals:          {len(trades)}  (Hold: {len(results_df) - len(trades)})")
-        print(f"Win rate (buy/sell only):  {win_rate:.1f}%")
-        print(f"Sum of simulated returns:  {total_return:+.2f}%  (naive sum, not compounded)")
+        print(f"Buy signals:               {len(trades)}  (Hold/Sell, no position: {len(results_df) - len(trades)})")
+        print(f"Win rate (buy/sell calls): {win_rate:.1f}%")
+        print(f"Compounded return:         {total_return:+.2f}%")
         return total_return
 
     print(f"\n=== Backtest Summary ({coin}) ===")

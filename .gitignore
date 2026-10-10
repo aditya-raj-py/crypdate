@@ -14,3 +14,7 @@ venv/
 # OS
 .DS_Store
 crypdate_datacollector.py
+
+.vscode/
+*_output*.txt
+rename_coins.py

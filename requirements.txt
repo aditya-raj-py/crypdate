@@ -2,3 +2,6 @@ requests
 prophet
 pandas
 matplotlib
+xgboost
+numpy
+scikit-learn
