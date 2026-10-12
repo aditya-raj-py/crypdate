@@ -18,3 +18,10 @@ crypdate_datacollector.py
 .vscode/
 *_output*.txt
 rename_coins.py
+
+crypdate_v1.py
+crypdate_v2.py
+crypdate_v3.py
+crypdate_v4.0.py
+backtest.py
+binance_live_logger.py
