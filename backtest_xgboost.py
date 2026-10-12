@@ -36,6 +36,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import warnings
 
@@ -175,6 +176,15 @@ def run_backtest(args):
     if test.empty:
         print("\nNo decision points fall in the test period. Check --test-start-date / --test-end-date.")
         return
+
+    # Save every decision point so crypdate_candles.py can draw the signals on a candle chart
+    decisions_path = None
+    if not args.no_save_decisions:
+        decisions_path = args.save_decisions or f"results/{args.symbol}_decisions.csv"
+        os.makedirs(os.path.dirname(decisions_path) or ".", exist_ok=True)
+        saved = points.copy()
+        saved["period"] = np.where(saved["date"] >= test_start, "test", "calibration")
+        saved.to_csv(decisions_path, index=False)
 
     # ---- Confidence thresholds ----
     manual = args.high_threshold_pct is not None and args.low_threshold_pct is not None
@@ -326,6 +336,10 @@ def run_backtest(args):
     if len(test) < 30 or n_buys < 20:
         print(f"  - Small sample ({len(test)} decision points, {n_buys} buys): treat all of this as noisy.")
 
+    if decisions_path:
+        print(f"\nDecision points saved to {decisions_path}. Draw them on candles with: "
+              f"python crypdate_candles.py --symbol {args.symbol}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Walk-forward backtest of the XGBoost decision logic with costs, risk metrics and an out-of-sample split")
     parser.add_argument("--db", default="crypdate_binance.db", help="Path to Binance OHLCV database")
@@ -339,6 +353,8 @@ if __name__ == "__main__":
     parser.add_argument("--slippage-pct", type=float, default=0.05, help="Assumed slippage per side, in percent")
     parser.add_argument("--random-trials", type=int, default=1000, help="Trials for the random-entry baseline")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for the random-entry baseline")
+    parser.add_argument("--save-decisions", default=None, help="CSV path for the decision points (default: results/<symbol>_decisions.csv)")
+    parser.add_argument("--no-save-decisions", action="store_true", help="Do not write the decision-points CSV")
     parser.add_argument("--calibration-fraction", type=float, default=0.5,
                         help="Share of decision points (earliest first) used to calibrate thresholds; the rest are the test set")
     parser.add_argument("--test-start-date", default=None, help="YYYY-MM-DD; overrides --calibration-fraction")

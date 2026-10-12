@@ -1,7 +1,6 @@
 requests
-prophet
 pandas
+numpy
 matplotlib
 xgboost
-numpy
 scikit-learn

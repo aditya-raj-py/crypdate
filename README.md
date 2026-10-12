@@ -1,37 +1,45 @@
 # CRYPDATE
 
-A crypto price logger, forecaster and signal generator, built incrementally from a simple price database into the early stages of a quantitative trading pipeline.
+A crypto forecasting, signal and backtesting toolkit, built incrementally from a simple price database into the early stages of a quantitative trading pipeline.
 
 **Status: research prototype. Not trading-ready. No consistent predictive edge has been found yet.** See [Status and results](#status-and-results) for what has and hasn't been shown.
 
-## Version history
+## Project history
 
-| Version | File | What it added |
-|---|---|---|
-| v1 | `crypdate_v1.py` | SQLite database (`prices` table) |
-| v2 | `crypdate_v2.py` | Live price fetching from CoinGecko |
-| v3 | `crypdate_v3.py` | 60-second logging loop and query helpers |
-| v4.0 | `crypdate_v4.0.py` | Prophet forecasting with confidence intervals and plots |
-| v4.1 | `crypdate_v4.0.py` | Buy/sell/hold decision signals |
-| v4.2 | `crypdate_v4.0.py`, `backtest.py` | Confidence scoring (absolute thresholds) and a walk-forward backtester |
-| v4.3 | `crypdate_xgboost.py`, `backtest_xgboost.py`, `binance_fetch.py`, `binance_live_logger.py` | XGBoost model, Binance data (years of daily OHLCV), confidence-weighted position sizing, and a backtester with costs, risk metrics and out-of-sample testing |
+| Version | What it added |
+|---|---|
+| v1 | SQLite price database |
+| v2 | Live price fetching from CoinGecko |
+| v3 | 60-second logging loop and query helpers |
+| v4.0 | Prophet forecasting with confidence intervals and plots |
+| v4.1 | Buy/sell/hold decision signals |
+| v4.2 | Confidence scoring and the first walk-forward backtester |
+| v4.3 | XGBoost model, Binance data, confidence-weighted position sizing, backtester with costs, risk metrics and out-of-sample testing |
+| v5.0 | Candlestick charts with backtest signal overlay |
 
-Each version is tagged in git (`v4.0`, `v4.1`, `v4.2`, `v4.3`), so any earlier state can be restored with `git checkout <tag>`.
+The main branch only contains the current XGBoost pipeline. The earlier scripts (CoinGecko logging, the Prophet pipeline and its backtester) were removed to keep it focused, but they remain in git history and tags. `git checkout v4.2` restores all of them.
 
-## How the current pipeline works (v4.3)
+## Files
+
+| File | Purpose |
+|---|---|
+| `binance_fetch.py` | Downloads full daily OHLCV history from Binance into `crypdate_binance.db` |
+| `crypdate_xgboost.py` | Feature engineering, XGBoost model, confidence band, signal and position size |
+| `backtest_xgboost.py` | Walk-forward backtester with costs, drawdown, Sharpe, out-of-sample split and random-entry baseline |
+| `crypdate_candles.py` | Candlestick charts, optionally with the backtest's buy/sell markers |
+
+## How the pipeline works
 
 ```
 Binance daily OHLCV  ->  feature engineering  ->  XGBoost  ->  signal + confidence  ->  position size  ->  backtest
 ```
 
-1. **Data:** `binance_fetch.py` downloads the full daily OHLCV history for bitcoin, ethereum and dogecoin from Binance's public API (no key needed) into `crypdate_binance.db`.
-2. **Features:** `crypdate_xgboost.py` builds 14 scale-invariant features from OHLCV: returns over several windows, distance from moving averages, volatility, daily range, volume change and RSI. Everything is relative or percentage-based on purpose, because prices spanned several orders of magnitude over the history.
+1. **Data:** `binance_fetch.py` downloads the full daily OHLCV history for bitcoin, ethereum and dogecoin from Binance's public API (no key needed).
+2. **Features:** 14 scale-invariant features: returns over several windows, distance from moving averages, volatility, daily range, volume change and RSI. Everything is relative or percentage-based on purpose, because prices spanned several orders of magnitude over the history.
 3. **Model:** XGBoost predicts the percent price change over a chosen horizon (default 7 days).
 4. **Confidence:** a band around the prediction is built from the model's validation error. Its half-width as a percentage of the predicted price is mapped to a 0-1 confidence score between two thresholds.
 5. **Signal and sizing:** a predicted change above the buy threshold (default +3%) gives a buy, below the sell threshold (default -3%) a sell, otherwise a hold. A buy gets a position size equal to its confidence score. Sells and holds size to zero: the project is long-only and does not short.
-6. **Backtest:** `backtest_xgboost.py` walks forward through history, retraining at each decision point on only the data available then (no look-ahead). It charges trading costs, reports max drawdown and Sharpe ratio, calibrates the confidence thresholds on earlier decision points and scores only later ones, and compares the model against cash, buy-and-hold, always-buying and a random-entry baseline.
-
-The earlier Prophet pipeline (`crypdate_v4.0.py`, `backtest.py`) is kept and still runs. It still uses the older rule where a low-confidence signal is downgraded to hold, and `backtest.py` has not been upgraded with the newer evaluation features.
+6. **Backtest:** walks forward through history, retraining at each decision point on only the data available then (no look-ahead). It charges trading costs, reports max drawdown and Sharpe ratio, calibrates the confidence thresholds on earlier decision points and scores only later ones, and compares the model against cash, buy-and-hold, always-buying and a random-entry baseline.
 
 ## Setup
 
@@ -39,7 +47,7 @@ The earlier Prophet pipeline (`crypdate_v4.0.py`, `backtest.py`) is kept and sti
 pip install -r requirements.txt
 ```
 
-Coin names are used as stored in the databases: `bitcoin`, `ethereum`, `dogecoin`.
+Coin names are used as stored in the database: `bitcoin`, `ethereum`, `dogecoin`.
 
 ## Usage
 
@@ -49,13 +57,7 @@ Download historical data (once, then rerun to refresh):
 python binance_fetch.py
 ```
 
-Log live prices every 60 seconds into `crypdate.db`:
-
-```bash
-python binance_live_logger.py
-```
-
-Generate a forecast, signal and position size with XGBoost:
+Generate a forecast, signal and position size:
 
 ```bash
 python crypdate_xgboost.py --symbol bitcoin
@@ -74,18 +76,18 @@ python backtest_xgboost.py --symbol bitcoin --step-days 7
 python backtest_xgboost.py --symbol bitcoin --test-start-date 2022-01-01 --test-end-date 2022-12-31
 ```
 
-Backtester flags: `--horizon-days`, `--step-days`, `--fee-pct`, `--slippage-pct`, `--calibration-fraction`, `--test-start-date`, `--test-end-date`, `--random-trials`, `--seed`, and manual `--high-threshold-pct` / `--low-threshold-pct` overrides. A full run retrains the model at every decision point and can take several minutes.
+Backtester flags: `--horizon-days`, `--step-days`, `--fee-pct`, `--slippage-pct`, `--calibration-fraction`, `--test-start-date`, `--test-end-date`, `--random-trials`, `--seed`, and manual `--high-threshold-pct` / `--low-threshold-pct` overrides. A full run retrains the model at every decision point and can take several minutes. Each run saves its decision points to `results/<symbol>_decisions.csv`.
+
+Draw candlesticks (and the backtest's signals, if a decisions file exists):
+
+```bash
+python crypdate_candles.py --symbol bitcoin
+python crypdate_candles.py --symbol ethereum --days 1700 --timeframe W --log
+```
 
 On Windows PowerShell, `>` saves output as UTF-16. To save it as UTF-8 instead: `python backtest_xgboost.py --symbol bitcoin | Out-File -Encoding utf8 results.txt`.
 
-Prophet version, run against the live log in `crypdate.db`:
-
-```bash
-python crypdate_v4.0.py --symbol bitcoin --periods 14 --freq D
-python backtest.py --symbol bitcoin
-```
-
-Databases (`*.db`) are not committed; see `.gitignore`.
+Databases (`*.db`) and backtest output (`results/`) are not committed; see `.gitignore`.
 
 ## Status and results
 
@@ -115,20 +117,20 @@ Simplifications in the backtester: strategies are in the market only for the hor
 - Rolling confidence calibration so position sizing adapts to changing volatility
 - Dogecoin results with the upgraded backtester
 - A second model version: cross-asset features (bitcoin returns as an input for other coins), trend-regime features, a longer horizon
+- Stock data (v5.1)
 - Risk management (volatility-based sizing, stop-losses, drawdown limits)
 - Paper trading and live execution
 
 ## Roadmap
 
-- [x] v1-v3: data collection
-- [x] v4.0-v4.2: Prophet forecasting, signals, confidence scoring, backtester
-- [x] v4.3: XGBoost, Binance data, position sizing
-- [x] Backtester upgrade: costs, drawdown, Sharpe, out-of-sample split, random-entry baseline
+- [x] v1-v4.2: data collection, Prophet forecasting, signals, confidence scoring, first backtester
+- [x] v4.3: XGBoost, Binance data, position sizing, upgraded backtester
+- [x] v5.0: candlestick charts with signal overlay
+- [ ] v5.1: stock data fetcher
 - [ ] Rolling confidence calibration
 - [ ] Model v2: cross-asset and regime features, longer horizon
 - [ ] Risk management layer
 - [ ] Paper trading
-- [ ] Stocks (v5)
 
 ## Disclaimer
 

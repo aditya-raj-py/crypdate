@@ -25,3 +25,5 @@ crypdate_v3.py
 crypdate_v4.0.py
 backtest.py
 binance_live_logger.py
+
+results/
