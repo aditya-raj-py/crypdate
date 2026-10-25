@@ -11,7 +11,7 @@ predict the price `horizon_days` ahead.
 Confidence is derived differently than Prophet's built-in interval: this
 holds out a validation slice, measures how far off the model's predictions
 were on data it didn't train on, and uses that error spread to build a
-yhat ± band - serving the same role Prophet's yhat_lower/yhat_upper did,
+yhat +/- band - serving the same role Prophet's yhat_lower/yhat_upper did,
 so the same downstream decision-signal logic can be reused.
 
 Data source: crypdate_binance.db (from binance_fetch.py), NOT
@@ -32,6 +32,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from xgboost import XGBRegressor
 
+from crypdate_markets import MARKETS, get_market, resolve_symbol
+
 warnings.filterwarnings("ignore")
 
 
@@ -44,7 +46,7 @@ def load_ohlcv(db_path: str, coin: str) -> pd.DataFrame:
     conn.close()
 
     if df.empty:
-        raise ValueError(f"No data found for coin '{coin}' in {db_path}. Run binance_fetch.py first.")
+        raise ValueError(f"No data found for '{coin}' in {db_path}. Run binance_fetch.py (crypto) or stock_fetch.py (stocks) first.")
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
     if df["timestamp"].dt.tz is not None:
@@ -81,7 +83,13 @@ def engineer_features(df: pd.DataFrame, horizon_days: int) -> pd.DataFrame:
 
     # Daily range and volume trend (already percentage-based)
     df["daily_range_pct"] = (df["high"] - df["low"]) / df["close"] * 100
-    df["volume_change_7d"] = df["volume"].pct_change(7)
+    # Zero-volume days (common in real stock data) would divide by zero and
+    # produce inf, which XGBoost rejects. Treat a zero as "no information",
+    # and a missing change as 0 (no change).
+    df["volume_change_7d"] = (
+        df["volume"].replace(0, np.nan).pct_change(7, fill_method=None)
+        .replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    )
 
     # Simple RSI (14-day) - already bounded 0-100, scale-invariant
     delta = df["close"].diff()
@@ -89,6 +97,9 @@ def engineer_features(df: pd.DataFrame, horizon_days: int) -> pd.DataFrame:
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["rsi_14"] = 100 - (100 / (1 + rs))
+
+    # Safety net: no feature may contain inf (bad prices, zero divisions)
+    df[FEATURE_COLUMNS] = df[FEATURE_COLUMNS].replace([np.inf, -np.inf], np.nan)
 
     # Target: PERCENT change `horizon_days` ahead, not raw future price
     df["target"] = (df["close"].shift(-horizon_days) - df["close"]) / df["close"] * 100
@@ -142,7 +153,12 @@ def train_and_predict(df_features: pd.DataFrame, horizon_days: int, val_fraction
     model.fit(labeled[FEATURE_COLUMNS], labeled["target"])
 
     # Predict from the most recent row (features exist, target doesn't)
-    latest_row = df_features.dropna(subset=FEATURE_COLUMNS).iloc[[-1]]
+    latest_row = df_features.iloc[[-1]]
+    if latest_row[FEATURE_COLUMNS].isna().any(axis=1).iloc[0]:
+        raise ValueError(
+            "The most recent row has missing features. Check the latest data for "
+            "zero or missing prices or volumes, then refetch."
+        )
     last_price = float(latest_row["close"].iloc[0])
     predicted_pct = float(model.predict(latest_row[FEATURE_COLUMNS])[0])
 
@@ -164,6 +180,7 @@ def generate_decision(
     sell_threshold: float = -3.0,
     high_threshold_pct: float = 8.0,
     low_threshold_pct: float = 20.0,
+    business_days: bool = False,
 ) -> dict:
     df_features = engineer_features(df, horizon_days)
     predicted_price, lower, upper, model, last_date = train_and_predict(df_features, horizon_days)
@@ -196,9 +213,16 @@ def generate_decision(
     # exactly those trades. No shorting, so sell/hold always size to 0.
     position_size_pct = round(confidence_score * 100, 1) if raw_signal == "buy" else 0.0
 
+    # Stocks do not trade on weekends: count the horizon in business days there
+    # (ignores exchange holidays, so the label can be a day or two off).
+    if business_days:
+        target = last_date + pd.offsets.BDay(horizon_days)
+    else:
+        target = last_date + pd.Timedelta(days=horizon_days)
+
     return {
         "last_price": round(float(last_price), 2),
-        "target_date": (last_date + pd.Timedelta(days=horizon_days)).strftime("%Y-%m-%d"),
+        "target_date": target.strftime("%Y-%m-%d"),
         "predicted_price": round(predicted_price, 2),
         "lower_bound": round(lower, 2),
         "upper_bound": round(upper, 2),
@@ -254,32 +278,41 @@ def plot_forecast(df: pd.DataFrame, decision: dict, symbol: str, save_path: str 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="XGBoost-based forecasting + decision signal (v4.3)")
-    parser.add_argument("--db", default="crypdate_binance.db", help="Path to Binance OHLCV database")
-    parser.add_argument("--symbol", required=True, help="Coin name, e.g. bitcoin, ethereum, dogecoin")
+    parser.add_argument("--market", choices=list(MARKETS), default="crypto",
+                        help="crypto (default), india or us. Picks the database, costs and calendar")
+    parser.add_argument("--db", default=None, help="OHLCV database path (default: the market's database)")
+    parser.add_argument("--symbol", required=True,
+                        help="Asset name: bitcoin, ethereum, dogecoin, or a ticker like RELIANCE / AAPL")
     parser.add_argument("--horizon-days", type=int, default=7)
-    parser.add_argument("--buy-threshold", type=float, default=3.0)
-    parser.add_argument("--sell-threshold", type=float, default=-3.0)
+    parser.add_argument("--buy-threshold", type=float, default=None, help="Predicted %% change that counts as a buy (default: the market profile)")
+    parser.add_argument("--sell-threshold", type=float, default=None, help="Predicted %% change that counts as a sell (default: the market profile)")
     parser.add_argument("--high-threshold-pct", type=float, default=8.0)
     parser.add_argument("--low-threshold-pct", type=float, default=20.0)
 
     args = parser.parse_args()
 
-    df = load_ohlcv(args.db, args.symbol)
-    print(f"Loaded {len(df)} days of OHLCV history for {args.symbol}\n")
+    market = get_market(args.market)
+    symbol = resolve_symbol(market, args.symbol)
+    cur = market.currency_prefix
+    day_word = "trading days" if market.uses_business_days else "days"
+
+    df = load_ohlcv(args.db or market.db_path, symbol)
+    print(f"Loaded {len(df)} days of OHLCV history for {symbol}" + ("" if market.name == "crypto" else f" ({market.name})") + "\n")
 
     decision = generate_decision(
         df,
         horizon_days=args.horizon_days,
-        buy_threshold=args.buy_threshold,
-        sell_threshold=args.sell_threshold,
+        buy_threshold=market.buy_threshold if args.buy_threshold is None else args.buy_threshold,
+        sell_threshold=market.sell_threshold if args.sell_threshold is None else args.sell_threshold,
         high_threshold_pct=args.high_threshold_pct,
         low_threshold_pct=args.low_threshold_pct,
+        business_days=market.uses_business_days,
     )
 
     print("--- CRYPDATED (XGBoost) ---")
-    print(f"Last known price:     ${decision['last_price']:,}")
-    print(f"Target date:          {decision['target_date']} ({args.horizon_days} days ahead)")
-    print(f"Predicted price:      ${decision['predicted_price']:,}  (range: ${decision['lower_bound']:,} - ${decision['upper_bound']:,})")
+    print(f"Last known price:     {cur}{decision['last_price']:,}")
+    print(f"Target date:          {decision['target_date']} ({args.horizon_days} {day_word} ahead)")
+    print(f"Predicted price:      {cur}{decision['predicted_price']:,}  (range: {cur}{decision['lower_bound']:,} - {cur}{decision['upper_bound']:,})")
     print(f"Predicted change:     {decision['percent_change']:+.2f}%")
     print(f"Confidence:           {decision['confidence_label']} ({decision['confidence_score']:.2f})")
     print(f"Interval half-width:  {decision['interval_half_width_pct']}% of predicted price")
@@ -290,3 +323,7 @@ if __name__ == "__main__":
     top_features = sorted(decision["feature_importance"].items(), key=lambda x: -x[1])[:5]
     for name, importance in top_features:
         print(f"  {name:<20} {importance}")
+
+    if market.name != "crypto":
+        print("\nNote: the buy/sell and confidence thresholds here are placeholders for stocks. "
+              "Run backtest_xgboost.py for this ticker to see calibrated confidence thresholds.")

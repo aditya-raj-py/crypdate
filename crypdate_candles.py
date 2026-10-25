@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.ticker import FuncFormatter, LogLocator
 
+from crypdate_markets import MARKETS, get_market, resolve_symbol
+
 UP_COLOR = "#26a69a"
 DOWN_COLOR = "#ef5350"
 
@@ -228,8 +230,10 @@ def plot_candles(window, window_start, symbol, timeframe, ma_periods, show_volum
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CRYPDATE v5.0 - candlestick charts with optional backtest signals")
-    parser.add_argument("--symbol", required=True, help="Asset name as stored in the database, e.g. bitcoin")
-    parser.add_argument("--db", default="crypdate_binance.db", help="Path to the OHLCV database")
+    parser.add_argument("--market", choices=list(MARKETS), default="crypto",
+                        help="crypto (default), india or us. Picks the database")
+    parser.add_argument("--symbol", required=True, help="Asset name: bitcoin, or a ticker like RELIANCE / AAPL")
+    parser.add_argument("--db", default=None, help="OHLCV database path (default: the market's database)")
     parser.add_argument("--table", default="ohlcv", help="Table name")
     parser.add_argument("--symbol-col", default="coin", help="Column holding the asset name")
     parser.add_argument("--days", type=int, default=180, help="How many calendar days back to show")
@@ -242,17 +246,19 @@ if __name__ == "__main__":
     parser.add_argument("--save", default=None, help="Save the chart as a PNG instead of opening a window")
     args = parser.parse_args()
 
-    df_daily = load_ohlcv(args.db, args.symbol, args.table, args.symbol_col)
+    market = get_market(args.market)
+    symbol = resolve_symbol(market, args.symbol)
+    df_daily = load_ohlcv(args.db or market.db_path, symbol, args.table, args.symbol_col)
     window, window_start = build_window(df_daily, args.timeframe, args.days, args.ma)
 
     signals = None
     if not args.no_signals:
-        signals_path = args.signals or f"results/{args.symbol}_decisions.csv"
+        signals_path = args.signals or f"results/{symbol}_decisions.csv"
         if os.path.exists(signals_path):
             signals = load_signals(signals_path)
             print(f"Using backtest signals from {signals_path}")
         elif args.signals:
             raise FileNotFoundError(f"Signals file not found: {args.signals}")
 
-    plot_candles(window, window_start, args.symbol, args.timeframe, args.ma,
+    plot_candles(window, window_start, symbol, args.timeframe, args.ma,
                  not args.no_volume, signals, args.log, args.save)

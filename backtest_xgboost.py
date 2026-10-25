@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from crypdate_xgboost import load_ohlcv, generate_decision
+from crypdate_markets import MARKETS, get_market, resolve_symbol
 
 warnings.filterwarnings("ignore")
 
@@ -88,13 +89,13 @@ def max_drawdown_pct(returns):
     return ((equity / peak) - 1).min() * 100
 
 
-def sharpe_ratio(returns, step_days):
+def sharpe_ratio(returns, step_days, periods_per_year=365):
     if len(returns) < 3:
         return float("nan")
     sd = returns.std(ddof=1)
     if sd == 0:
         return 0.0
-    return returns.mean() / sd * np.sqrt(365 / step_days)
+    return returns.mean() / sd * np.sqrt(periods_per_year / step_days)
 
 
 # --------------------------------------------------------------------------
@@ -102,7 +103,7 @@ def sharpe_ratio(returns, step_days):
 # --------------------------------------------------------------------------
 
 def collect_decision_points(df, horizon_days, step_days, buy_threshold, sell_threshold,
-                            min_training_days, end_date=None):
+                            min_training_days, end_date=None, verbose=True):
     points = []
     i = min_training_days
 
@@ -137,8 +138,11 @@ def collect_decision_points(df, horizon_days, step_days, buy_threshold, sell_thr
         }
         points.append(point)
 
-        print(f"{date:%Y-%m-%d}  signal={point['signal']:<5} predicted={point['predicted_pct']:+7.2f}%  "
-              f"actual={point['actual_pct']:+7.2f}%  width=+/-{point['half_width_pct']:.1f}%")
+        if verbose:
+            print(f"{date:%Y-%m-%d}  signal={point['signal']:<5} predicted={point['predicted_pct']:+7.2f}%  "
+                  f"actual={point['actual_pct']:+7.2f}%  width=+/-{point['half_width_pct']:.1f}%")
+        elif len(points) % 20 == 0:
+            print(".", end="", flush=True)  # progress dots for the batch runner
 
         i += step_days
 
@@ -231,10 +235,14 @@ def run_backtest(args):
     win_rate = correct.mean() * 100 if len(directional) else 0.0
 
     print(f"\n=== Backtest Summary ({args.symbol}, XGBoost) ===")
+    if args.market != "crypto":
+        print(f"Market: {args.market}  (steps count trading days; Sharpe annualized with {args.periods_per_year} periods per year)")
     print(f"Decision points total: {len(points)}  (calibration: {len(calib)}, test: {len(test)})")
     print(f"Test period: {test['date'].iloc[0]:%Y-%m-%d} to {test['date'].iloc[-1]:%Y-%m-%d}")
     print(f"Confidence thresholds: high <= {high_thr:.1f}%, low >= {low_thr:.1f}%  [{source}]")
     print(f"Costs: {args.fee_pct}% fee + {args.slippage_pct}% slippage per side (charged on every buy, round trip)")
+    if args.market != "crypto":
+        print(f"Signal thresholds: buy above {args.buy_threshold:+.1f}%, sell below {args.sell_threshold:+.1f}% predicted change")
     print(f"Test signals: buy {buys}, sell {sells}, hold {holds}   "
           f"invested at {buys / len(test) * 100:.0f}% of decision points")
     if buys:
@@ -254,7 +262,7 @@ def run_backtest(args):
     print(f"\n{'Strategy':<22}{'Net return':>12}{'Max drawdown':>15}{'Sharpe':>9}")
     for name, rets in rows:
         print(f"{name:<22}{total_return_pct(rets):>+11.1f}%{max_drawdown_pct(rets):>14.1f}%"
-              f"{sharpe_ratio(rets, args.step_days):>9.2f}")
+              f"{sharpe_ratio(rets, args.step_days, args.periods_per_year):>9.2f}")
 
     print(f"\nCost drag (return before costs -> after):")
     print(f"  Full-size: {total_return_pct(full_gross):+.1f}% -> {total_return_pct(full_net):+.1f}%")
@@ -337,20 +345,25 @@ def run_backtest(args):
         print(f"  - Small sample ({len(test)} decision points, {n_buys} buys): treat all of this as noisy.")
 
     if decisions_path:
+        market_flag = "" if args.market == "crypto" else f" --market {args.market}"
         print(f"\nDecision points saved to {decisions_path}. Draw them on candles with: "
-              f"python crypdate_candles.py --symbol {args.symbol}")
+              f"python crypdate_candles.py{market_flag} --symbol {args.symbol}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Walk-forward backtest of the XGBoost decision logic with costs, risk metrics and an out-of-sample split")
-    parser.add_argument("--db", default="crypdate_binance.db", help="Path to Binance OHLCV database")
-    parser.add_argument("--symbol", required=True, help="Coin name, e.g. bitcoin, ethereum, dogecoin")
+    parser.add_argument("--market", choices=list(MARKETS), default="crypto",
+                        help="crypto (default), india or us. Picks the database, costs and calendar")
+    parser.add_argument("--db", default=None, help="OHLCV database path (default: the market's database)")
+    parser.add_argument("--symbol", required=True,
+                        help="Asset name: bitcoin, ethereum, dogecoin, or a ticker like RELIANCE / AAPL")
     parser.add_argument("--horizon-days", type=int, default=7)
     parser.add_argument("--step-days", type=int, default=14, help="Days between decision points (smaller = more samples, slower)")
-    parser.add_argument("--buy-threshold", type=float, default=3.0)
-    parser.add_argument("--sell-threshold", type=float, default=-3.0)
+    parser.add_argument("--buy-threshold", type=float, default=None, help="Predicted %% change that counts as a buy (default: the market profile)")
+    parser.add_argument("--sell-threshold", type=float, default=None, help="Predicted %% change that counts as a sell (default: the market profile)")
     parser.add_argument("--min-training-days", type=int, default=90)
-    parser.add_argument("--fee-pct", type=float, default=0.1, help="Exchange fee per side, in percent")
-    parser.add_argument("--slippage-pct", type=float, default=0.05, help="Assumed slippage per side, in percent")
+    parser.add_argument("--fee-pct", type=float, default=None, help="Fee per side, in percent (default: the market profile)")
+    parser.add_argument("--slippage-pct", type=float, default=None, help="Assumed slippage per side, in percent (default: the market profile)")
+    parser.add_argument("--periods-per-year", type=int, default=None, help="Decision days per year for the Sharpe ratio (default: the market profile)")
     parser.add_argument("--random-trials", type=int, default=1000, help="Trials for the random-entry baseline")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for the random-entry baseline")
     parser.add_argument("--save-decisions", default=None, help="CSV path for the decision points (default: results/<symbol>_decisions.csv)")
@@ -364,4 +377,14 @@ if __name__ == "__main__":
     parser.add_argument("--high-threshold-pct", type=float, default=None, help="Manual override (use with --low-threshold-pct)")
     parser.add_argument("--low-threshold-pct", type=float, default=None, help="Manual override (use with --high-threshold-pct)")
 
-    run_backtest(parser.parse_args())
+    args = parser.parse_args()
+    market = get_market(args.market)
+    args.symbol = resolve_symbol(market, args.symbol)
+    args.db = args.db or market.db_path
+    args.fee_pct = market.fee_pct if args.fee_pct is None else args.fee_pct
+    args.slippage_pct = market.slippage_pct if args.slippage_pct is None else args.slippage_pct
+    args.periods_per_year = args.periods_per_year or market.periods_per_year
+    args.buy_threshold = market.buy_threshold if args.buy_threshold is None else args.buy_threshold
+    args.sell_threshold = market.sell_threshold if args.sell_threshold is None else args.sell_threshold
+
+    run_backtest(args)

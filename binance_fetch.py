@@ -30,6 +30,15 @@ DB_PATH = "crypdate_binance.db"
 BASE_URL = "https://api.binance.com/api/v3/klines"
 MS_PER_DAY = 86_400_000
 
+# Maps Binance symbols to the SAME full coin names used everywhere else in
+# the project (crypdate.db, crypdate_historical.db) so --symbol is
+# consistent no matter which database/script you're using.
+SYMBOL_TO_COIN = {
+    "BTCUSDT": "bitcoin",
+    "ETHUSDT": "ethereum",
+    "DOGEUSDT": "dogecoin",
+}
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute("""
@@ -111,8 +120,8 @@ def backfill(symbols: list[str], db_path: str = DB_PATH, clear_first: bool = Tru
         print("Cleared existing rows before backfilling.\n")
 
     for symbol in symbols:
-        coin = symbol.replace("USDT", "").lower()  # BTCUSDT -> bitcoin-style label "btc"
-        print(f"Fetching full history for {symbol}...")
+        coin = SYMBOL_TO_COIN.get(symbol, symbol.replace("USDT", "").lower())
+        print(f"Fetching full history for {symbol} (stored as '{coin}')...")
 
         try:
             rows = fetch_all_klines(symbol)
